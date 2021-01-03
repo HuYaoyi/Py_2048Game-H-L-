@@ -1,0 +1,45 @@
+
+import os
+import pygame
+import sys
+from pygame.locals import *
+from button import BFButton
+
+pygame.init()
+screencaption = pygame.display.set_caption('失败界面')
+screen = pygame.display.set_mode((600,600))
+logo=pygame.image.load('lost.png')
+background=pygame.image.load('picc.jpg')
+background = pygame.transform.scale(background, (600, 600))
+
+def do_click1(btn):
+    pygame.quit()
+    exit()
+
+def do_click2(btn):
+    os.system('python .\py2048.py')
+    
+   
+
+button1 = BFButton(screen, (150,490,300,60),text='Quit',click=do_click1) 
+button2 = BFButton(screen,(150,50,300,60))
+button2.text = 'Play Again!'
+button1.click = do_click1
+button2.click = do_click2
+button1.bg_color=(255,250,205)
+button2.bg_color=(255,250,205)
+while True:
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+             pygame.quit()
+             exit()
+        button1.update(event)
+        button2.update(event)
+        
+    screen.fill((255,192,203)) 
+    screen.blit(background,(0,0))
+    screen.blit(logo,(180,150))
+    button1.draw()
+    button2.draw()
+
+    pygame.display.update() 
