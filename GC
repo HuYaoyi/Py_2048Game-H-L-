@@ -1,0 +1,630 @@
+#==========================================================================================
+#Game Center
+#==========================================================================================
+from random import randint
+import time
+import math
+import os
+import pygame
+import numpy
+import sys
+from random import shuffle
+from copy import deepcopy
+from pygame.locals import*
+
+actionDic = {0: "UP", 1: "DOWN", 2: "LEFT", 3: "RIGHT"}
+(PLAYER_TURN, COMPUTER_TURN) = (0, 1) 
+tileVal = [2, 4]  
+Rule_size = 4
+directionVectors = (UP_VEC, DOWN_VEC, LEFT_VEC, RIGHT_VEC) = ((-1, 0), (1, 0), (0, -1), (0, 1))   
+
+
+#==========================================================================================
+# AI部分：格局评估函数——用四个指标去评价一个局面的 “价值”
+#==========================================================================================
+#总格局评估函数=以下四个格局评估函数的分数加总
+def Eval(Rule):
+    return  Eval1(Rule) + Eval2(Rule) + Eval3(Rule) + Eval4(Rule)
+
+#=====格局评估函数1——分数指标=====#
+#通过游戏分数（用最大方块值的倍数表示）来衡量一个格局的“价值”
+def Eval1(Rule):
+    if not Rule.canMove:
+        return -float('inf')   
+    maxvalue = Rule.getMax()
+    score = maxvalue
+    return 4*score
+
+
+#=====格局评估函数2——特征性指标=====#
+#通过方块分布的特征性来评估一个格局的“价值”（大块尽量朝角落移动、依次按规律递减放置的格局较容易取得高分）
+def Eval2(Rule):
+    #记录朝四个角落移动的得分情况
+    scr = [0, 0, 0, 0]
+    #三重循环(k代表的是优先堆砌的角落方向，在k固定后，遍历整个棋盘，所有大于4的块乘以weight_mat矩阵对应处的权重系数，得到该格局下Eval2的分数)
+    for k in range(4):  
+        for i in range(Rule_size):
+            for j in range(Rule_size):
+                #获得（i，j)处方块的值
+                val = Rule.GetValue((i, j))
+                #若方块值大于4
+                if val > 4:
+                    #用该值乘以weight_mat矩阵对应处的权重系数
+                    scr[k] += weight_mat[k][i][j] * val
+    return max(scr)
+
+#权重矩阵（每个元素是一个4*4的矩阵，代表的是一种赋权方式）
+#例如weight_max的第一个元素是[[13, 9, 6, 4],   不难发现在左上角的权重最大。
+#                           [9, 6, 4, 2],     所以为了scr最大的分数，
+#                           [6, 4, 2, 1],     理想情况下，最大的方块会向左上角移动，
+#                          [4, 2, 1, 0]]      然后其余按照大小依次堆砌。
+#之所以要写4*4*4而不是4*4矩阵，是考虑到四角的对称性 
+weight_mat = [[[13, 9, 6, 4],[9, 6, 4, 2],[6, 4, 2, 1],[4, 2, 1, 0]],
+              [[4, 2, 1, 0],[6, 4, 2, 1],[9, 6, 4, 2],[13, 9, 6, 4]],
+              [[0, 1, 2, 4],[1 ,2, 4, 6],[2, 4, 6, 9],[4, 6, 8, 13]],
+              [[4, 9, 6, 4],[2, 4, 6, 9],[1, 2, 4, 6],[0, 1, 2, 4]]]
+                
+#======格局评估函数3——平滑性指标=====#
+# 通过方块分布的平滑性来评估一个格局的“价值”（相邻方块间差异较小时容易实现合并）
+def Eval3(Rule):
+    scr = 0
+    #遍历棋盘
+    for i in range(Rule_size):
+        for j in range(Rule_size):
+            cur_pos = (i, j)
+            val = Rule.GetValue(cur_pos)#得到该方格处方块的值
+            #遍历四个方向的相邻方格
+            for dir in directionVectors:
+                pos = (cur_pos[0] + dir[0], cur_pos[1] + dir[1])
+                #判断是否越界，如越界跳过此轮循环
+                if Rule.Ifillegal(pos) == True:
+                    continue
+                #相邻方格处方块的值
+                nbr = Rule.GetValue(pos)
+                #计算（i,j)处方格与相邻方格处方块值的差，由于差越小说明越平滑，格局越好，故在前面取负号
+                scr -= abs(val - nbr)
+                #如果与相邻块值相同的话，说明可以合并，是一个好的特征，故而给一定的加分
+                if val == nbr:
+                    scr += 2*nbr
+    return scr
+
+#======格局评估函数4——空格数指标======#
+# 通过空格数来评估一个格局的“价值”（空格数越多说明局面越好，尤其是在游戏后期，空格数尤为重要）
+def Eval4(Rule):
+    scr=0
+    #将canmove
+    if not Rule.canMove:
+        return -float('inf')
+    #获得空格数
+    scr = len(Rule.GetBlankCells()) 
+    #在空格数数量不同的情况下，该项函数的权重系数不同；空格数越少时，说明此时空格数越重要，权重应相应提高
+    #空格数在[7,10]范围内，权重系数赋3
+    if scr < 11 and scr > 6:
+        scr = 3*scr
+    #空格数在[4,6]范围内，权重系数赋5
+    elif scr < 7 and scr > 3:   
+        scr = 5*scr
+    #空格数在[1,3]范围内，权重系数赋10
+    elif scr < 4:
+        scr = 10*scr
+    return scr
+
+#==========================================================================================
+# AIplayer类（AI游戏策略）：通过递归搜索得到较优的移动方向
+#==========================================================================================
+class AIplayer:    
+    def __init__(self, max_turn=16, maxTime=0.18):
+        self.max_dep = max_turn
+        self.time = time.process_time()
+        self.maxTime = maxTime
+   
+    #返回最终指令（上/下/左/右)
+    def getMove(self, Rule):
+        NAP = AIplayer()
+        return NAP.solve(Rule)   
+           
+    #有两种方式可能产生新格局——一种是在计算机回合，计算机随机生成2或4；另一种是在AI回合，AI朝上下左右中的一个方向进行移动
+    #函数CSturn和函数AIturn分别对应以上两种情况，通过递归的方法不断相互调用，每调用一次，dep+=1，不断往下搜索
+    #递归出口在满足下述三种情况中的一种时：1.dep达到设定的最大深度 2.超过设定的单步最长搜索时间 3.无法移动
+    def CSturn(self, Rule, dep):
+        #得到空白方块
+        cells = Rule.GetBlankCells()
+        #初始化
+        utility = 0
+        for cell in cells:
+            #将当前格局复制两份
+            child1 = Rule.clone() 
+            child2 = Rule.clone()
+            # 分别在空白处随机插入方格2或4
+            child1.SetValue(cell, 2)
+            child2.SetValue(cell, 4)
+            #由于随机生成2或4的概率分别为0.9和0.1，调用AIturn函数进入AI回合，得到该回合新格局（dep+1）的评估分值，再对分值加权平均
+            utility += 0.9*self.AIturn(child1, dep + 1)[1] + 0.1*self.AIturn(child2, dep + 1)[1]  
+            #平均（除以空格数len(cells)）
+            utility =  utility / len(cells)   
+        #递归出口 
+        if self.terminal_test(cells, dep):
+            return Eval(Rule)
+        
+        return  utility
+
+    def AIturn(self, Rule, dep):
+        # self.dep +=1
+        moves = Rule.getAvailableMoves() 
+        max_utility = -1
+        mov = None 
+        shuffle(moves)
+        #递归出口
+        if self.terminal_test(moves, dep):
+            return (None, Eval(Rule))        
+        #遍历四个方向，取最佳的方向       
+        for m in moves:
+            #克隆当前格局
+            child = Rule.clone()
+            #该方向不能移动
+            if not child.move(m):
+                continue
+           #调用CSturn函数进入计算机回合，得到计算机随机生成方块后的新格局（dep+1），返回新格局的评估分值
+            utility = self.CSturn(child, dep + 1)
+              #找到四个方向中评估分值最高的方向
+            if utility > max_utility:
+                max_utility = utility
+                mov = m      
+        #返回方向和格局评估分数
+        return (mov, max_utility)
+    
+    #得到最终指令（上/下/左/右)
+    def solve(self, Rule):
+        #找到移动方向 
+        m = self.AIturn(Rule, 0)[0] 
+        #找不到就随意移动一个方向
+        if m is None:
+            moves = Rule.getAvailableMoves()
+            return moves[0]
+        return m    
+        
+   #终止条件（是否搜索到设定的最大深度，是否无法移动，是否超时）   
+    def terminal_test(self, actions, dep):
+        if dep == self.max_dep or len(actions) == 0 or time.process_time() - self.time > self.maxTime:
+            return True
+        else:
+            return False 
+      
+#==========================================================================================
+# GamePlay类：游戏进程管理
+#==========================================================================================
+     
+class GamePlay:
+    def __init__(self, size):
+        self.Rule = Rule(size)
+        self.possibleNewTiles = [2, 4] # 每次移动产生新块的值
+        self.probability = 0.9
+        self.initTiles = 2
+        self.AIplayer = None
+        self.over = False
+        self.ShowSurface = ShowSurface(size)
+    #------------------------------------------mode1：人机模式（玩家游戏，AI辅助）--------------------------#        
+    def mode1(self):
+        for i in range(self.initTiles):
+            self.insertRandonTile()        
+        turn = PLAYER_TURN
+        maxTile = 0
+        self.prevTime = time.process_time()
+        #当游戏尚未结束时
+        while not self.isGameOver() and not self.over:
+            # 进行深度拷贝，让ai对拷贝的进行操作
+            RuleCopy = self.Rule.clone()
+            move = None
+            #玩家回合
+            if turn == PLAYER_TURN:
+                while True:
+                    order = input("向上移动请输入u,向下移动请输入d\n向左移动请输入l,向右移动请输入r\n想要退出请输入q,想要回到菜单请输入Table\n如要求助AI请输入help\n")
+                    #求助指令
+                    if order=='help':
+                        print("AI智能规划策略结果为：", end="")
+                        move = self.AIplayer.getMove(RuleCopy)
+                        break
+                    #上下左右指令
+                    elif order == 'u':
+                        print("玩家输入的指令是：", end="")
+                        move = 0
+                        break
+                    elif order == 'd':
+                        print("玩家输入的指令是：", end="")
+                        move = 1
+                        break
+                    elif order == 'l':
+                        print("玩家输入的指令是：", end="")
+                        move = 2
+                        break
+                    elif order == 'r':
+                        print("玩家输入的指令是：", end="")
+                        move = 3
+                        break
+                    #返回主界面指令
+                    elif order == 'Table':
+                        os.system('python .\main.py')
+                    #退出指令
+                    elif order == 'q':
+                        sys.exit(0)
+                    #无效指令
+                    else:
+                        print("输入无效，请重新输入")
+                        
+                print(actionDic[move])               
+                if move != None and move >= 0 and move < 4:
+                    # 判断原地图是否能进行移动
+                    if self.Rule.canMove([move]):
+                        self.Rule.move(move)
+                        # 更新最大值
+                        maxTile = self.Rule.getMax()
+                    else:
+                        print("Invalid AIplayer Move")
+                        self.over = True
+                else:
+                    print("Invalid AIplayer Move - 1")
+                    self.over = True
+                self.printDisplay(self.Rule)
+            else:
+                move = self.getMove()
+                # 确认移动
+                if move and self.Rule.canInsert(move):
+                    self.Rule.SetValue(move, self.getNewTileValue())
+                else:
+                    self.over = True
+            turn = 1 - turn
+        print(maxTile)
+        
+        return maxTile
+        
+    #------------------------------------------模式2：智能模式（AI全自动）--------------------------# 
+    def mode2(self):
+        for i in range(self.initTiles):
+            self.insertRandonTile()
+        # AIplayer先移动
+        turn = PLAYER_TURN
+        maxTile = 0
+        self.prevTime = time.process_time()
+
+        while not self.isGameOver() and not self.over:
+            # 进行深度拷贝，让ai对拷贝的进行操作
+            RuleCopy = self.Rule.clone()
+            move = None
+            #当游戏尚未结束时
+            if turn == PLAYER_TURN:
+                print("AI指令:", end="")
+                move = self.AIplayer.getMove(RuleCopy)
+                print(actionDic[move])
+                # 确认移动
+                if move != None and move >= 0 and move < 4:
+                    # 判断原地图是否能进行移动
+                    if self.Rule.canMove([move]):
+                        self.Rule.move(move)
+                        # 更新最大值
+                        maxTile = self.Rule.getMax()
+                    else:
+                        print("Invalid AIplayer Move")
+                        self.over = True
+                else:
+                    print("Invalid AIplayer Move - 1")
+                    self.over = True
+                self.printDisplay(self.Rule)
+            else:
+                move = self.getMove()
+                # 确认移动
+                if move and self.Rule.canInsert(move):
+                    self.Rule.SetValue(move, self.getNewTileValue())
+                else:
+                    self.over = True
+            turn = 1 - turn
+            
+        print(maxTile)
+        
+        return maxTile
+    
+    #计算机回合放置方块
+    def getMove(self):
+        cells = self.Rule.GetBlankCells()
+        return cells[randint(0, len(cells) - 1)] if cells else None  
+    #设定AI玩家
+    def setAIplayer(self, AIplayer):
+        self.AIplayer  = AIplayer    
+    # 判断游戏是否结束
+    def isGameOver(self):
+        return not self.Rule.canMove()
+    #随机生成2或4
+    def getNewTileValue(self):
+        if randint(0, 99) < 100 * self.probability:
+            return self.possibleNewTiles[0]
+        else:
+            return self.possibleNewTiles[1];    
+    # 随机插入块
+    def insertRandonTile(self):
+        tileValue = self.getNewTileValue()
+        cells = self.Rule.GetBlankCells()
+        cell = cells[randint(0, len(cells) - 1)]
+        self.Rule.SetValue(cell, tileValue)
+       
+    # 分数统计以及打印设置               
+    def printDisplay(self, Rule):
+        score = 0
+        for i in range(Rule.size):
+            for j in range(Rule.size):                
+                print("%6d  " % Rule.map[i][j], end="")
+                if Rule.map[i][j] == 2:
+                    pass
+                elif Rule.map[i][j] == 4:
+                    score += 4
+                elif Rule.map[i][j] == 8:
+                    score += 2*Rule.map[i][j] 
+                elif Rule.map[i][j] == 16:
+                    score += 3*Rule.map[i][j] 
+                elif Rule.map[i][j] == 32:
+                    score += 4*Rule.map[i][j] 
+                elif Rule.map[i][j] == 64:
+                    score += 5*Rule.map[i][j] 
+                elif Rule.map[i][j] == 128:
+                    score += 6*Rule.map[i][j] 
+                elif Rule.map[i][j] == 256:
+                    score += 7*Rule.map[i][j]
+                elif Rule.map[i][j] == 512:
+                    score += 8*Rule.map[i][j] 
+                elif Rule.map[i][j] == 1024:
+                    score += 9*Rule.map[i][j] 
+                elif Rule.map[i][j] == 2048:
+                    score += 10*Rule.map[i][j]
+                elif Rule.map[i][j] == 4096:
+                    score += 11*Rule.map[i][j] 
+            print("")
+        print("")
+        print("当前分数：%d\n"%score)
+        self.ShowSurface.drawSurface(Rule.map,score)
+                                      
+#==========================================================================================
+# ShowSurface类：图形界面绘制
+#==========================================================================================
+class ShowSurface:
+    def __init__(self,size):
+        pygame.init()
+        self.Size = size
+        self.Block_WH = 110 #每个块的长度宽度
+        self.BLock_Space = 10 #两个块之间的间隙
+        self.Block_Size = self.Block_WH*self.Size+(self.Size+1)*self.BLock_Space
+        self.Screen_Size = (self.Block_Size,self.Block_Size+110)
+        self.Title_Rect = pygame.Rect(0,0,self.Block_Size,110) #设置标题矩形的大小
+        self.screen = pygame.display.set_mode(self.Screen_Size,0,32)
+        self.Block_Color = {#设置颜色
+                0:(150,150,150),
+                2:(255,255,128),
+                4:(205, 193, 180),
+                8: (242, 177, 121),
+                16: (245, 149, 99),
+                32: (246, 124, 95),
+                64: (246, 94, 59),
+                128: (237, 207, 114),
+                256: (237, 204, 98),
+                512: (237, 200, 80),
+                1024: (237, 197, 63),
+                2048: (225, 187, 0),
+                4096:(255,10,0)
+		}
+     
+#画界面       
+    def drawSurface(self,matrix,score):
+        pygame.draw.rect(self.screen,(255,255,255),self.Title_Rect) 
+        font1 = pygame.font.SysFont('simsun',48)
+        self.screen.blit(font1.render('AI Show',True,(250,0,0)),(180,20)) 
+        self.screen.blit(font1.render('Score:',True,(250,0,0)),(250,70))     
+        self.screen.blit(font1.render('%d' % score,True,(250,0,0)),(360,70))
+        a,b = numpy.array(matrix).shape
+        for i in range(a):
+            for j in range(b):
+                self.drawBlock(self.screen,i,j,self.Block_Color[matrix[i][j]],matrix[i][j])
+        pygame.display.update()
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit()
+                sys.exit(0)
+#画小块    
+    def drawBlock(self,screen,row,column,color,blocknum):
+        font = pygame.font.SysFont('stxingkai',80)
+        w = column*self.Block_WH+(column+1)*self.BLock_Space
+        h = row*self.Block_WH+(row+1)*self.BLock_Space+110
+        pygame.draw.rect(screen,color,(w,h,110,110))
+        if blocknum != 0:
+            fw,fh = font.size(str(int(blocknum)))
+            screen.blit(font.render(str(int(blocknum)),True,(0,0,0)),(w+(110-fw)/2,h+(110-fh)/2))
+            
+#==========================================================================================
+# Rule类：2048游戏基本操作
+#==========================================================================================
+vecIndex = [UP, DOWN, LEFT, RIGHT] = range(4)
+class Rule:
+    #初始化，生成4*4的地图
+    def __init__(self, size):#=5
+        self.size = size
+        self.map = numpy.zeros((size,size)) 
+   #判断方格坐标是否越界
+    def Ifillegal(self, pos):        
+        if pos[0] < 0 or pos[0] >= self.size or pos[1] < 0 or pos[1] >= self.size:
+            return True
+        else:
+            return False 
+    #设置方块的值，想要嵌入的位置是（pos[0],pos[2])，想要嵌入的值是value
+    def SetValue(self, pos, value):
+        self.map[pos[0]][pos[1]] = value
+    # 在网格的块中插入一个数字（生成2或4）
+    #def insertNewN(self, pos, value):
+     #   self.SetValue(pos, value)     
+    # 获取块的值
+    def GetValue(self, pos):
+        if not self.Ifillegal(pos):
+            return self.map[pos[0]][pos[1]]
+        else:
+            return None       
+    # 对自己进行深度拷贝
+    def clone(self):
+        RuleCopy = Rule(self.size)
+        RuleCopy.map = deepcopy(self.map)
+        RuleCopy.size = self.size
+        return RuleCopy
+
+    # 获取网格中没有数字的块的坐标（即为0的块）
+    def GetBlankCells(self):
+        cells = []
+        for x in range(self.size):
+            for y in range(self.size):
+                if self.map[x][y] == 0:
+                    cells.append((x, y))
+        return cells
+
+    
+    # 获取当前网格中块的最大值
+    def getMax(self):
+        maxTile = 0
+        for x in range(self.size):
+            for y in range(self.size):
+                maxTile = max(maxTile, self.map[x][y])
+        return maxTile
+
+    # 检查当前网格是否还能继续插入块
+    def canInsert(self, pos):
+        return self.GetValue(pos) == 0
+
+    # 块合并（相同的块合并）
+    def merge(self, cells):
+        if len(cells) <= 1:
+            return cells
+        i = 0
+        while i < len(cells) - 1:
+            if cells[i] == cells[i + 1]:
+                cells[i] *= 2
+                del cells[i + 1]
+            i += 1
+    # 获取所有可以移动的情况
+    def getAvailableMoves(self, dirs=[0,1,2,3]):
+        availableMoves = []
+        for x in dirs:
+            RuleCopy = self.clone()
+            if RuleCopy.move(x):
+                availableMoves.append(x)
+        return availableMoves
+    
+    # 检查是否能进行移动，用于判断游戏是否结束
+    def canMove(self, dirs=[0,1,2,3]):
+        checkingMoves = set(dirs)
+        for x in range(self.size):
+            for y in range(self.size):
+                if self.map[x][y]: # 判断当前坐标是否有块
+                    for i in checkingMoves: # 遍历需要移动的值
+                        move = directionVectors[i]
+                        adjCellValue = self.GetValue((x + move[0], y + move[1]))
+                        if adjCellValue == self.map[x][y] or adjCellValue == 0: # 当块的值一样或为0时可以进行移动（合并）
+                            return True
+                elif self.map[x][y] == 0: # 当前块为0时一样可以移动
+                    return True
+        return False
+
+    # 上下左右移动
+    def move(self, dir):
+        dir = int(dir)
+        moved = False #记录是否移动       
+        if dir == UP:
+            order = 'u'
+        if dir == DOWN:
+            order = 'd'
+        if dir == LEFT:
+            order = 'l'
+        if dir == RIGHT:
+            order = 'r'
+        #下移操作
+        if order == 'd':
+            r = range(self.size - 1, -1, -1)  
+            for j in range(self.size):
+                cells = []
+                for i in r:
+                    cell = self.map[i][j]
+                    if cell != 0:
+                        cells.append(cell)
+                self.merge(cells)
+                for i in r:
+                    value = cells.pop(0) if cells else 0
+                    if self.map[i][j] != value:
+                        moved = True
+                    self.map[i][j] = value 
+        #上移操作
+        elif order == 'u':
+            r= range(self.size)
+            for j in range(self.size):
+                cells = []
+                for i in r:
+                    cell = self.map[i][j]
+                    if cell != 0:
+                        cells.append(cell)
+                self.merge(cells)
+                for i in r:
+                    value = cells.pop(0) if cells else 0
+                    if self.map[i][j] != value:
+                        moved = True
+                    self.map[i][j] = value
+        #右移操作
+        elif order == 'r':
+            r = range(self.size - 1, -1, -1)
+            for i in range(self.size):
+                cells = []
+                for j in r:
+                    cell = self.map[i][j]
+                    if cell != 0:
+                        cells.append(cell)
+                self.merge(cells)
+                for j in r:
+                    value = cells.pop(0) if cells else 0
+                    if self.map[i][j] != value:
+                        moved = True
+                    self.map[i][j] = value
+        #左移操作
+        elif order == 'l':        
+            r = range(self.size)  
+            for i in range(self.size):
+                cells = []
+                for j in r:
+                    cell = self.map[i][j]
+                    if cell != 0:
+                        cells.append(cell)
+                self.merge(cells)
+                for j in r:
+                    value = cells.pop(0) if cells else 0
+                    if self.map[i][j] != value:
+                        moved = True
+                    self.map[i][j] = value
+
+        return moved
+
+
+
+#==========================================================================================
+# main函数
+#==========================================================================================  
+def main():
+    print("\n\n--------------------------------------------------------------\n----------------------2048游戏AI版欢迎您-----------------------\n--------------------------------------------------------------\n")
+    print("请先完成游戏初始设置：\n")      
+    N=int(input("设置1：输入你想要AI挑战的棋盘维数\n4*4棋盘：请输入4\n5*5棋盘请输入5\n6*6棋盘请输入6\n\n"))
+    m = input("设置2：游戏子模式选择：\n学习模式请按1：在每一回合，玩家可以选择自己给出移动指令或寻求AI帮助智能规划\n演示模式请按2：AI自动show到底\n\n")
+    
+    GP = GamePlay(N)    
+    AP = AIplayer()
+    GP.setAIplayer(AP)
+    
+    
+    if  m =="1":
+        print("\n游戏即将开始，请玩家准备就绪：\n")  
+        return GP.mode1()
+                 
+    elif m =="2":
+        return GP.mode2() 
+                   
+if __name__ == '__main__':
+
+    main()
+    os.system('pause')
+
