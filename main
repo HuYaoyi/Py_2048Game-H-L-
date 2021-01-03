@@ -1,0 +1,53 @@
+import os
+import pygame
+import sys
+from pygame.locals import *
+from button import BFButton
+
+pygame.init()
+screencaption = pygame.display.set_caption('2048游戏模式选择界面')
+screen = pygame.display.set_mode((600,600))
+background=pygame.image.load('pic2.jpg')
+background = pygame.transform.scale(background, (600, 600))
+
+def do_click1(btn):
+    os.system('python .\py2048.py')#执行python2048.py
+def do_click2(btn):
+    os.system('python .\GC.py')
+def do_click3(btn):
+    pygame.quit()
+    exit()
+def do_click4(btn):
+    pass
+
+button1 = BFButton(screen, (40,420,240,60))
+button2 = BFButton(screen, (300,420,240,60))
+button4 = BFButton(screen,(40,50,490,60))
+button1.text = 'Mode 1 : You Play'
+button2.text = 'Mode 2 : AI Show'
+button4.text = '2048 Game'
+button4.bg_color=(245,245,245)
+button1.click = do_click1
+button2.click = do_click2
+button3 = BFButton(screen, (40,490,500,40),text='Quit',click=do_click3)
+button3.bg_color=(245,245,245)
+while True:
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+             pygame.quit()
+             exit()
+        button1.update(event)
+        button2.update(event)
+        button3.update(event)
+
+    screen.fill((135,206,250))
+    
+    screen.blit(background,(0,0))
+    button1.draw()
+    button2.draw()
+    button3.draw()
+    button4.draw()
+   
+   
+    pygame.display.update() 
+    
